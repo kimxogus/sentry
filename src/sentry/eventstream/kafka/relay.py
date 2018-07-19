@@ -106,6 +106,10 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
     )
 
     def handle_version_1_message(operation, event_data, task_state):
+        if operation != 'insert':
+            logger.debug('Skipping unsupported operation: %s', operation)
+            return None
+
         # TODO: `event_data['datetime']` needs to be converted back to a Python `datetime` instance!
         kwargs = {
             'event': Event(**{
