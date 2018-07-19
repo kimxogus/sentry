@@ -5,8 +5,9 @@ import uuid
 
 from confluent_kafka import Consumer, OFFSET_BEGINNING, TopicPartition
 
-from sentry.utils import json
 from sentry.eventstream.kafka.state import PartitionState, SynchronizedPartitionStateManager
+from sentry.tasks.post_process import post_process_group
+from sentry.utils import json
 
 
 logger = logging.getLogger(__name__)
@@ -104,12 +105,55 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
         on_assign=rewind_partitions_on_assignment,
     )
 
+    def handle_version_1_message(operation, event_data, task_state):
+        # TODO: `event_data['datetime']` needs to be converted back to a Python `datetime` instance!
+        kwargs = {
+            'event': Event(**{
+                name: event_data[name] for name in [
+                    'group_id',
+                    'event_id',
+                    'project_id',
+                    'message',
+                    'platform',
+                    'datetime',
+                    'data',  # TODO: Make sure that this actually works?
+                ]
+            }),
+            'primary_hash': event_data['primary_hash'],
+        }
+
+        for name in ('is_new', 'is_sample', 'is_regression', 'is_new_group_environment'):
+            kwargs[name] = task_state[name]
+
+        return kwargs
+
+    version_handlers = {
+        1: handle_version_1_message,
+    }
+
+    def parse_event_message(message):
+        payload = json.loads(message.value())
+
+        try:
+            version = payload[0]
+        except IndexError:
+            raise Exception('Received event payload with unexpected structure')
+
+        try:
+            handler = version_handlers[int(version)]
+        except (ValueError, KeyError):
+            raise Exception('Received event payload with unexpected version identifier: {}'.format(version))
+
+        return handler(*payload[1:])
+
     for consumer, message in join([commit_log_topic, events_consumer]):
         if consumer is events_consumer:
             assert message.topic() == events_topic
             partition_state_manager.validate_local_message(message.topic(), message.partition(), message.offset())
-            raise NotImplementedError  # TODO: Schedule the post-processing job.
-            consumer.commit(message=message)
+            task_kwargs = parse_event_message(message)
+            if task_kwargs is not None:
+                post_process_group.delay(**task_kwargs)
+            consumer.commit(message=message)  # TODO: It's probably excessive to commit after every message
             partition_state_manager.set_local_offset(message.topic(), message.partition(), message.offset() + 1)
         elif consumer is commit_log_consumer:
             assert message.topic() == commit_log_topic
@@ -121,4 +165,4 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
                 offset = int(message.value().decode('utf-8'))
                 partition_state_manager.set_remote_offset(topic, partition, offset)
         else:
-            raise Exception('Recieved message from an unexpected consumer!')
+            raise Exception('Received message from an unexpected consumer!')
