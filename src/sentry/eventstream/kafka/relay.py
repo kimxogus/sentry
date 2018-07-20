@@ -5,6 +5,7 @@ import uuid
 
 from confluent_kafka import Consumer, OFFSET_BEGINNING, TopicPartition
 
+from sentry.models import Event
 from sentry.eventstream.kafka.state import PartitionState, SynchronizedPartitionStateManager
 from sentry.tasks.post_process import post_process_group
 from sentry.utils import json
@@ -120,7 +121,7 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
                     'message',
                     'platform',
                     'datetime',
-                    'data',  # TODO: Make sure that this actually works?
+                    'data',
                 ]
             }),
             'primary_hash': event_data['primary_hash'],
