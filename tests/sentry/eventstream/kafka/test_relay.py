@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import mock
 import pytest
 import pytz
 from datetime import datetime
@@ -7,9 +8,28 @@ from datetime import datetime
 from sentry.eventstream.kafka.relay import (
     InvalidPayload,
     InvalidVersion,
+    join,
     parse_event_message,
 )
 from sentry.utils import json
+
+
+def test_join():
+    consumer = mock.MagicMock()
+
+    message = mock.Mock()
+    message.error.return_value = None
+
+    consumer.poll.side_effect = [None, None, message]
+
+    joined_consumer = join([consumer])
+    assert next(joined_consumer) == (consumer, message)
+
+    assert consumer.poll.mock_calls == [
+        mock.call(0.0),  # not throttled
+        mock.call(0.1),  # throttled, no return value
+        mock.call(0.1),  # throttled, returned message
+    ]
 
 
 def test_parse_event_message_invalid_payload():
