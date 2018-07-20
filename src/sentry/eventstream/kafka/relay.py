@@ -31,6 +31,54 @@ def join(consumers, timeout=0.0, throttle=0.1):
             i = 0
 
 
+def handle_version_1_message(operation, event_data, task_state):
+    if operation != 'insert':
+        logger.debug('Skipping unsupported operation: %s', operation)
+        return None
+
+    # TODO: `event_data['datetime']` needs to be converted back to a Python `datetime` instance!
+    kwargs = {
+        'event': Event(**{
+            name: event_data[name] for name in [
+                'group_id',
+                'event_id',
+                'project_id',
+                'message',
+                'platform',
+                'datetime',
+                'data',
+            ]
+        }),
+        'primary_hash': event_data['primary_hash'],
+    }
+
+    for name in ('is_new', 'is_sample', 'is_regression', 'is_new_group_environment'):
+        kwargs[name] = task_state[name]
+
+    return kwargs
+
+
+version_handlers = {
+    1: handle_version_1_message,
+}
+
+
+def parse_event_message(message):
+    payload = json.loads(message.value())
+
+    try:
+        version = payload[0]
+    except IndexError:
+        raise Exception('Received event payload with unexpected structure')
+
+    try:
+        handler = version_handlers[int(version)]
+    except (ValueError, KeyError):
+        raise Exception('Received event payload with unexpected version identifier: {}'.format(version))
+
+    return handler(*payload[1:])
+
+
 def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_topic, synchronize_commit_group):
     def commit_callback(error, partitions):
         if error is not None:
@@ -105,51 +153,6 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
         [commit_log_topic],
         on_assign=rewind_partitions_on_assignment,
     )
-
-    def handle_version_1_message(operation, event_data, task_state):
-        if operation != 'insert':
-            logger.debug('Skipping unsupported operation: %s', operation)
-            return None
-
-        # TODO: `event_data['datetime']` needs to be converted back to a Python `datetime` instance!
-        kwargs = {
-            'event': Event(**{
-                name: event_data[name] for name in [
-                    'group_id',
-                    'event_id',
-                    'project_id',
-                    'message',
-                    'platform',
-                    'datetime',
-                    'data',
-                ]
-            }),
-            'primary_hash': event_data['primary_hash'],
-        }
-
-        for name in ('is_new', 'is_sample', 'is_regression', 'is_new_group_environment'):
-            kwargs[name] = task_state[name]
-
-        return kwargs
-
-    version_handlers = {
-        1: handle_version_1_message,
-    }
-
-    def parse_event_message(message):
-        payload = json.loads(message.value())
-
-        try:
-            version = payload[0]
-        except IndexError:
-            raise Exception('Received event payload with unexpected structure')
-
-        try:
-            handler = version_handlers[int(version)]
-        except (ValueError, KeyError):
-            raise Exception('Received event payload with unexpected version identifier: {}'.format(version))
-
-        return handler(*payload[1:])
 
     for consumer, message in join([commit_log_topic, events_consumer]):
         if consumer is events_consumer:
