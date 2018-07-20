@@ -1,9 +1,9 @@
 from __future__ import absolute_import
 
+import pytz
 import logging
 import uuid
-
-from confluent_kafka import Consumer, OFFSET_BEGINNING, TopicPartition
+from datetime import datetime
 
 from sentry.models import Event
 from sentry.eventstream.kafka.state import PartitionState, SynchronizedPartitionStateManager
@@ -36,7 +36,11 @@ def handle_version_1_message(operation, event_data, task_state):
         logger.debug('Skipping unsupported operation: %s', operation)
         return None
 
-    # TODO: `event_data['datetime']` needs to be converted back to a Python `datetime` instance!
+    event_data['datetime'] = datetime.strptime(
+        event_data['datetime'],
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+    ).replace(tzinfo=pytz.utc)
+
     kwargs = {
         'event': Event(**{
             name: event_data[name] for name in [
@@ -63,23 +67,33 @@ version_handlers = {
 }
 
 
+class InvalidPayload(Exception):
+    pass
+
+
+class InvalidVersion(Exception):
+    pass
+
+
 def parse_event_message(message):
-    payload = json.loads(message.value())
+    payload = json.loads(message)
 
     try:
         version = payload[0]
-    except IndexError:
-        raise Exception('Received event payload with unexpected structure')
+    except Exception:
+        raise InvalidPayload('Received event payload with unexpected structure')
 
     try:
         handler = version_handlers[int(version)]
     except (ValueError, KeyError):
-        raise Exception('Received event payload with unexpected version identifier: {}'.format(version))
+        raise InvalidVersion('Received event payload with unexpected version identifier: {}'.format(version))
 
     return handler(*payload[1:])
 
 
 def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_topic, synchronize_commit_group):
+    from confluent_kafka import Consumer, OFFSET_BEGINNING, TopicPartition
+
     def commit_callback(error, partitions):
         if error is not None:
             logger.warning('Failed to commit offsets (error: %s, partitions: %r)', error, partitions)
@@ -158,7 +172,7 @@ def relay(bootstrap_servers, events_topic, events_consumer_group, commit_log_top
         if consumer is events_consumer:
             assert message.topic() == events_topic
             partition_state_manager.validate_local_message(message.topic(), message.partition(), message.offset())
-            task_kwargs = parse_event_message(message)
+            task_kwargs = parse_event_message(message.value())
             if task_kwargs is not None:
                 post_process_group.delay(**task_kwargs)
             consumer.commit(message=message)  # TODO: It's probably excessive to commit after every message
