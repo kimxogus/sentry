@@ -20,7 +20,7 @@ def join(consumers, timeout=0.0, throttle=0.1):
         for consumer in consumers:
             message = consumer.poll(timeout if i < len(consumers) else timeout + throttle)
             if message is None:
-                i = max(i + 1, len(consumers))
+                i = min(i + 1, len(consumers))
                 continue
 
             error = message.error()
